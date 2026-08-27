@@ -291,8 +291,11 @@ collect_ifaces() {
 collect_pci_wifi() {
   CTX[has_pci_wifi]="0"
   CTX[has_intel_wifi]="0"
+  CTX[has_broadcom]="0"
+  CTX[has_realtek]="0"
   CTX[pci_modules]=""
   CTX[pci_in_use]=""
+  CTX[pci_bdfs]=""
   CTX[missing_ko]=""
   CTX[not_loaded]=""
   CTX[unclaimed]="0"
@@ -308,6 +311,7 @@ collect_pci_wifi() {
     lspci -nnk 2>/dev/null | awk '
       /^[0-9a-fA-F:.]+ / {
         flush()
+        addr=$1
         line=$0
         interesting = (line ~ /Network controller|Wireless|802\.11|Wi-Fi|WLAN/)
         inuse=""; mods=""
@@ -325,23 +329,28 @@ collect_pci_wifi() {
       END { flush() }
       function flush() {
         if (!interesting) return
-        print "DEV|" inuse "|" mods "|" line
+        print "DEV|" inuse "|" mods "|" addr "|" line
         interesting=0
       }
     '
   )"
   echo "$parsed" >>"$LOG_FILE"
 
-  local line inuse mods mod found any=0 missing="" not_loaded="" all_mods="" all_inuse=""
+  local line inuse mods bdf rest mod found any=0 missing="" not_loaded="" all_mods="" all_inuse="" all_bdf=""
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
     any=1
     inuse="$(echo "$line" | cut -d'|' -f2)"
     mods="$(echo "$line" | cut -d'|' -f3 | tr ',' ' ')"
+    bdf="$(echo "$line" | cut -d'|' -f4)"
+    rest="$(echo "$line" | cut -d'|' -f5-)"
     all_inuse="$all_inuse $inuse"
     all_mods="$all_mods $mods"
-    echo "$line" | grep -qi 'Intel\|8086' && CTX[has_intel_wifi]="1"
+    all_bdf="$all_bdf $bdf"
+    echo "$rest" | grep -qi 'Intel\|8086' && CTX[has_intel_wifi]="1"
     echo "$mods" | grep -q 'iwlwifi' && CTX[has_intel_wifi]="1"
+    echo "$rest" | grep -qiE 'Broadcom|14e4' && CTX[has_broadcom]="1"
+    echo "$rest" | grep -qiE 'Realtek|10ec' && CTX[has_realtek]="1"
     if [[ -z "$inuse" ]]; then
       CTX[unclaimed]="1"
     fi
@@ -362,6 +371,7 @@ collect_pci_wifi() {
   fi
   CTX[pci_modules]="$(echo "$all_mods" | xargs echo 2>/dev/null || true)"
   CTX[pci_in_use]="$(echo "$all_inuse" | xargs echo 2>/dev/null || true)"
+  CTX[pci_bdfs]="$(echo "$all_bdf" | xargs echo 2>/dev/null || true)"
   CTX[missing_ko]="$(echo "$missing" | xargs echo 2>/dev/null || true)"
   CTX[not_loaded]="$(echo "$not_loaded" | xargs echo 2>/dev/null || true)"
 }
@@ -583,28 +593,28 @@ classify() {
   fi
 }
 
-# 根据最终标签生成人工说明。修复过程中的 add_manual 会保留。
+# 根据最终仍存在的标签生成人工说明（用户跳过或确认修复未完全成功）。
 advise_from_tags() {
   if has_tag rfkill_hard; then
-    add_manual "WiFi 被硬件射频锁关闭。请按笔记本飞行模式键（常见 Fn+F2 / Fn+F12），或拨动机身无线开关后再运行本脚本。"
+    add_manual "射频锁仍是硬件封锁。请按飞行模式键或机身开关，再运行本脚本。"
   fi
   if has_tag firmware_missing; then
-    add_manual "内核找不到固件：${CTX[firmware_files]:-（见日志 dmesg）}。请从另一台能联网的机器安装/更新 linux-firmware，或把缺失的 .ucode 拷到 /lib/firmware/（Intel 新固件也可能在 /lib/firmware/intel/iwlwifi/），然后执行: sudo update-initramfs -u && sudo reboot"
+    add_manual "固件仍缺失：${CTX[firmware_files]:-（见日志）}。请把对应 .ucode 放到 /lib/firmware/ 或 /lib/firmware/intel/iwlwifi/ 后执行 sudo update-initramfs -u && sudo reboot"
   fi
   if has_tag windows_fast_startup_suspect; then
-    add_manual "检测到 Windows 双系统迹象。请在 Windows 中关闭「快速启动」（控制面板 → 电源选项 → 选择电源按钮的功能），取消网卡「允许计算机关闭此设备以节约电源」，然后选择关机（不是重启），等待数秒再进 Ubuntu。"
+    add_manual "Linux 侧复位后网卡仍异常。请到 Windows 关闭「快速启动」和网卡「允许计算机关闭此设备」，然后关机（不是重启）再进 Ubuntu。"
   fi
   if has_tag secure_boot_dkms; then
-    add_manual "Secure Boot 已开启，且有模块因签名被拒绝加载。不要让本脚本关 Secure Boot。可在 BIOS 中关闭 Secure Boot，或用 mokutil 导入 DKMS 密钥后再重启。"
+    add_manual "MOK 尚未生效。若已导入密钥请重启并在 MOK Manager 中 Enroll；否则可在 BIOS 关闭 Secure Boot。"
   fi
   if has_tag no_wifi_hardware; then
-    add_manual "PCI/USB 均未看到无线控制器。若是虚拟机，请直通/添加无线网卡；若是实体机，请冷关机（拔电或长按电源）后再开，排除硬件未上电。"
+    add_manual "扫描后仍看不到无线控制器。虚拟机请直通网卡；实体机请冷关机（拔电或长按电源）后再开。"
   fi
   if has_tag dkms_broken && [[ "${CTX[dkms_purge_backport]:-0}" != "1" ]]; then
-    add_manual "第三方 DKMS 无线驱动未在当前内核 ${KERNEL} 上安装成功。可在 GRUB 的 Advanced options 里选上一个内核进入；不要从 GitHub 强行编译（新 HWE 内核经常编不过）。"
+    add_manual "DKMS 仍未在内核 ${KERNEL} 上成功。可进 GRUB 旧内核，或联网后重装对应 dkms 包；不要从 GitHub 强行编译。"
   fi
   if has_tag modules_extra_missing; then
-    add_manual "若本机完全断网且 apt 缓存没有包，请重启进入 GRUB → Advanced options → 上一个内核，联网后执行: sudo apt-get install -y linux-modules-extra-${KERNEL} ，再重启回到当前内核。"
+    add_manual "仍缺 linux-modules-extra-${KERNEL}。请用旧内核或网线联网后执行: sudo apt-get install -y linux-modules-extra-${KERNEL}"
   fi
   if is_gnome && wifi_visible; then
     add_manual "GNOME 顶栏图标由系统壳层绘制。若网卡已恢复但仍无图标，请注销重新登录；X11 下也可 Alt+F2 输入 r 回车。"
@@ -791,6 +801,112 @@ fix_safe_all() {
   fix_nm_restart
 }
 
+# ---------- 可复用的硬件/固件动作 ----------
+
+pci_sys_path() {
+  local bdf="$1" p
+  for p in "/sys/bus/pci/devices/${bdf}" "/sys/bus/pci/devices/0000:${bdf}"; do
+    if [[ -d "$p" ]]; then
+      printf '%s\n' "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
+reload_wifi_modules() {
+  local mod
+  for mod in ${CTX[pci_in_use]} ${CTX[pci_modules]} iwlwifi iwlmvm rtw88_8821ce rtw89_8852ae mt7921e brcmfmac wl; do
+    [[ -z "$mod" ]] && continue
+    modprobe -r "$mod" >>"$LOG_FILE" 2>&1 || true
+  done
+  sleep 1
+  for mod in ${CTX[pci_modules]} iwlwifi; do
+    [[ -z "$mod" ]] && continue
+    modprobe "$mod" >>"$LOG_FILE" 2>&1 || true
+  done
+}
+
+pci_wifi_reset() {
+  local bdf sys
+  for bdf in ${CTX[pci_bdfs]}; do
+    [[ -z "$bdf" ]] && continue
+    sys="$(pci_sys_path "$bdf" || true)"
+    [[ -z "$sys" ]] && continue
+    log "PCI reset/remove $bdf ($sys)"
+    if [[ -f "$sys/reset" ]]; then
+      echo 1 >"$sys/reset" 2>>"$LOG_FILE" || true
+      sleep 1
+    fi
+    if [[ -f "$sys/remove" ]]; then
+      echo 1 >"$sys/remove" 2>>"$LOG_FILE" || true
+    fi
+  done
+  sleep 1
+  if [[ -w /sys/bus/pci/rescan ]]; then
+    echo 1 >/sys/bus/pci/rescan 2>>"$LOG_FILE" || true
+    add_action "已执行 PCI rescan"
+  fi
+  reload_wifi_modules
+}
+
+usb_bus_rescan() {
+  local d
+  if [[ -w /sys/bus/pci/rescan ]]; then
+    echo 1 >/sys/bus/pci/rescan 2>>"$LOG_FILE" || true
+  fi
+  shopt -s nullglob
+  for d in /sys/bus/usb/devices/*/authorized; do
+    echo 1 >"$d" 2>>"$LOG_FILE" || true
+  done
+  shopt -u nullglob
+  if [[ -w /sys/bus/usb/drivers_probe ]]; then
+    echo 1 >/sys/bus/usb/drivers_probe 2>>"$LOG_FILE" || true
+  fi
+}
+
+find_fallback_kernel() {
+  local k need found
+  need="${CTX[missing_ko]}"
+  for k in $(ls -1 /lib/modules 2>/dev/null | sort -V -r); do
+    [[ "$k" == "$KERNEL" ]] && continue
+    [[ -d "/lib/modules/$k" ]] || continue
+    if [[ -n "$need" ]]; then
+      found=1
+      local m
+      for m in $need; do
+        if ! find "/lib/modules/$k" \( -name "${m}.ko" -o -name "${m}.ko.xz" -o -name "${m}.ko.zst" -o -name "${m}.ko.gz" \) 2>/dev/null | grep -q .; then
+          found=0
+          break
+        fi
+      done
+      [[ "$found" -eq 1 ]] && { printf '%s\n' "$k"; return 0; }
+    elif find "/lib/modules/$k" \( -name 'iwlwifi.ko*' -o -name 'rtw88*.ko*' -o -name 'mt7921e.ko*' -o -name 'brcmfmac.ko*' \) 2>/dev/null | grep -q .; then
+      printf '%s\n' "$k"
+      return 0
+    fi
+  done
+  return 1
+}
+
+grub_entry_for_kernel() {
+  local k="$1" cfg="/boot/grub/grub.cfg"
+  [[ -f "$cfg" ]] || return 1
+  local title
+  title="$(awk -F"'" -v k="$k" '
+    /menuentry / && $2 ~ k {
+      print $2
+      exit
+    }
+  ' "$cfg")"
+  [[ -n "$title" ]] || return 1
+  if grep -q "submenu .*Advanced options" "$cfg"; then
+    printf 'Advanced options for Ubuntu>%s\n' "$title"
+  else
+    printf '%s\n' "$title"
+  fi
+}
+
 # ---------- 高风险修复 ----------
 
 fix_netplan() {
@@ -898,6 +1014,192 @@ fix_blacklist() {
   systemctl restart NetworkManager >>"$LOG_FILE" 2>&1 || true
 }
 
+fix_rfkill_hard() {
+  has_tag rfkill_hard || return 0
+  if ! ui_ask "检测到 WiFi 被硬件射频锁（hard block）关闭。软件无法代替物理开关，但可以再试一次解除，并打开电台。\n\n请在点「执行」的同时按飞行模式键（常见 Fn+F2 / Fn+F12）或拨动机身无线开关。\n\n是否执行？"; then
+    add_manual "已跳过硬射频锁处理。请按飞行模式键或机身开关后重新运行。"
+    return 0
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    add_action "[演练] rfkill unblock + 开电台（硬封锁）"
+    return 0
+  fi
+  rfkill unblock wifi >>"$LOG_FILE" 2>&1 || true
+  rfkill unblock all >>"$LOG_FILE" 2>&1 || true
+  have nmcli && nmcli radio wifi on >>"$LOG_FILE" 2>&1 || true
+  have nmcli && nmcli networking on >>"$LOG_FILE" 2>&1 || true
+  add_action "已尝试解除射频锁并打开 WiFi 电台；若 rfkill 仍显示 Hard blocked，只能按物理键"
+}
+
+fix_windows_fast_startup() {
+  has_tag windows_fast_startup_suspect || return 0
+  if ! ui_ask "疑似 Windows 快速启动让无线网卡停在半关机状态。Linux 侧将复位 PCI 网卡并重新加载驱动。\n\n这不能在 Windows 里关掉快速启动；若复位后仍无网卡，还需到 Windows 关闭快速启动后冷关机。\n\n是否执行 PCI 复位？"; then
+    add_manual "已跳过 PCI 复位。请在 Windows 关闭「快速启动」后关机（不是重启），等待数秒再进 Ubuntu。"
+    return 0
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    add_action "[演练] PCI 复位无线网卡（缓解快速启动）"
+    return 0
+  fi
+  pci_wifi_reset
+  add_action "已复位 PCI 无线网卡并重新加载驱动（快速启动残留）"
+}
+
+fix_firmware() {
+  has_tag firmware_missing || return 0
+  local files="${CTX[firmware_files]:-未知 .ucode}"
+  if ! ui_ask "内核找不到无线固件：${files}\n\n将尝试：在 /lib/firmware 里查找并拷贝已有文件、用 apt 重装 linux-firmware、更新 initramfs 并重新加载 iwlwifi。\n\n断网且本机没有固件文件时会失败。\n\n是否执行？"; then
+    add_manual "已跳过固件修复。缺失：${files}。可从另一台机器拷贝到 /lib/firmware/ 或 /lib/firmware/intel/iwlwifi/ 后执行 sudo update-initramfs -u && sudo reboot"
+    return 0
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    add_action "[演练] 安装/拷贝无线固件"
+    return 0
+  fi
+  local f src dest copied=0
+  mkdir -p /lib/firmware
+  for f in ${CTX[firmware_files]}; do
+    [[ -z "$f" ]] && continue
+    if [[ -e "/lib/firmware/$f" || -e "/lib/firmware/${f}.zst" ]]; then
+      continue
+    fi
+    src="$(find /lib/firmware -name "$f" -o -name "${f}.zst" 2>/dev/null | head -n 1 || true)"
+    if [[ -n "$src" ]]; then
+      dest="/lib/firmware/$(basename "$src")"
+      cp -a "$src" "$dest" >>"$LOG_FILE" 2>&1 && copied=1
+      add_action "已拷贝固件 $src -> $dest"
+    fi
+  done
+  if DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall linux-firmware >>"$LOG_FILE" 2>&1 \
+    || DEBIAN_FRONTEND=noninteractive apt-get install -y linux-firmware >>"$LOG_FILE" 2>&1; then
+    add_action "已安装/重装 linux-firmware"
+    copied=1
+  else
+    log "apt linux-firmware 失败"
+  fi
+  if [[ "$copied" -eq 1 ]]; then
+    update-initramfs -u >>"$LOG_FILE" 2>&1 || true
+    reload_wifi_modules
+  else
+    add_manual "本机没有找到 ${files}，且无法联网安装 linux-firmware。请从能上网的电脑下载对应 .ucode 放到 /lib/firmware/ 后重启。"
+  fi
+}
+
+fix_secure_boot_mok() {
+  has_tag secure_boot_dkms || return 0
+  if ! ui_ask "Secure Boot 已开启，未签名 DKMS 模块被拒绝加载。\n\n将导入本机 DKMS/MOK 证书（不会关 Secure Boot、不改 BIOS）。随后需设置一次性密码，重启时在 MOK Manager 里选 Enroll 并输入该密码。\n\n是否导入密钥？"; then
+    add_manual "已跳过 MOK 导入。可在 BIOS 关 Secure Boot，或稍后执行: sudo mokutil --import /var/lib/shim-signed/mok/MOK.der"
+    return 0
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    add_action "[演练] mokutil --import DKMS 密钥"
+    return 0
+  fi
+  if ! have mokutil; then
+    add_manual "未安装 mokutil。请安装 mokutil 后重新运行，或在 BIOS 关闭 Secure Boot。"
+    return 0
+  fi
+  local der=""
+  if [[ -f /var/lib/shim-signed/mok/MOK.der ]]; then
+    der="/var/lib/shim-signed/mok/MOK.der"
+  elif [[ -f /var/lib/dkms/mok.pub ]] && have openssl; then
+    der="${BACKUP_DIR}/mok.der"
+    openssl x509 -inform PEM -in /var/lib/dkms/mok.pub -outform DER -out "$der" >>"$LOG_FILE" 2>&1 || der=""
+  fi
+  if [[ -z "$der" || ! -f "$der" ]]; then
+    add_manual "未找到 DKMS MOK 证书（/var/lib/shim-signed/mok/MOK.der）。可安装 dkms 后重试，或在 BIOS 关闭 Secure Boot。"
+    return 0
+  fi
+  if [[ ! -t 0 ]]; then
+    add_manual "当前没有可用终端输入 MOK 密码。请在终端执行: sudo mokutil --import $der 然后重启，在 MOK Manager 中登记密钥。"
+    return 0
+  fi
+  echo "请为 MOK 设置密码（重启登记时要再输入一次）："
+  if mokutil --import "$der"; then
+    add_action "已申请导入 MOK 密钥 $der。请立刻重启，在蓝色 MOK Manager 界面选择 Enroll MOK"
+  else
+    add_manual "mokutil --import 失败。可在 BIOS 关闭 Secure Boot，或检查 $der 后手动导入。"
+  fi
+}
+
+fix_dkms_rebuild() {
+  has_tag dkms_broken || return 0
+  [[ "${CTX[dkms_purge_backport]:-0}" == "1" ]] && return 0
+  local hint="将安装当前内核 headers 并执行 dkms autoinstall，然后尝试加载内核自带无线模块。"
+  if [[ "${CTX[has_broadcom]}" == "1" ]]; then
+    hint="${hint} 检测到 Broadcom，若编译仍失败可再装 bcmwl-kernel-source（需要网络）。"
+  fi
+  if ! ui_ask "第三方 DKMS 无线驱动未在当前内核 ${KERNEL} 上装好。\n\n${hint}\n不会从 GitHub 拉驱动。\n\n是否执行？"; then
+    add_manual "已跳过 DKMS 重建。可在 GRUB Advanced options 选上一个内核，或联网后重装对应 dkms 包。"
+    return 0
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    add_action "[演练] dkms autoinstall / 加载 in-tree 模块"
+    return 0
+  fi
+  DEBIAN_FRONTEND=noninteractive apt-get install -y "linux-headers-${KERNEL}" dkms >>"$LOG_FILE" 2>&1 || true
+  if have dkms; then
+    dkms autoinstall >>"$LOG_FILE" 2>&1 || true
+    add_action "已执行 dkms autoinstall"
+  fi
+  if [[ "${CTX[has_broadcom]}" == "1" ]]; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y bcmwl-kernel-source >>"$LOG_FILE" 2>&1 && add_action "已安装 bcmwl-kernel-source" || true
+  fi
+  local mod
+  for mod in ${CTX[pci_modules]}; do
+    [[ -z "$mod" ]] && continue
+    modprobe "$mod" >>"$LOG_FILE" 2>&1 || true
+  done
+  systemctl restart NetworkManager >>"$LOG_FILE" 2>&1 || true
+}
+
+fix_no_hardware() {
+  has_tag no_wifi_hardware || return 0
+  if ! ui_ask "PCI/USB 当前看不到无线控制器。将重新扫描 PCI/USB 总线（虚拟机若未直通网卡，扫描也出不来）。\n\n是否扫描总线？"; then
+    add_manual "已跳过总线扫描。虚拟机请直通/添加无线网卡；实体机请冷关机后再开。"
+    return 0
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    add_action "[演练] PCI/USB rescan"
+    return 0
+  fi
+  usb_bus_rescan
+  pci_wifi_reset
+  add_action "已扫描 PCI/USB 总线"
+}
+
+fix_modules_extra_grub() {
+  has_tag modules_extra_missing || return 0
+  local prev entry
+  prev="$(find_fallback_kernel || true)"
+  if [[ -z "$prev" ]]; then
+    add_manual "当前内核缺少 linux-modules-extra-${KERNEL}，本机也没有带这些模块的旧内核。请用 U 盘/网线联网后执行: sudo apt-get install -y linux-modules-extra-${KERNEL}"
+    return 0
+  fi
+  if ! ui_ask "当前内核 ${KERNEL} 缺少无线模块，apt 未能装上 linux-modules-extra。\n\n检测到旧内核 ${prev} 带有对应模块。可以把「下一次启动」设为该内核（只影响下次重启，不永久改默认项）。\n\n是否设置并请你稍后重启？"; then
+    add_manual "已跳过切换旧内核。可在 GRUB → Advanced options 手动选 ${prev}，联网后执行: sudo apt-get install -y linux-modules-extra-${KERNEL}"
+    return 0
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    add_action "[演练] grub-reboot 到 $prev"
+    return 0
+  fi
+  if ! have grub-reboot; then
+    add_manual "没有 grub-reboot。请重启时在 GRUB Advanced options 选择 ${prev}。"
+    return 0
+  fi
+  entry="$(grub_entry_for_kernel "$prev" || true)"
+  if [[ -z "$entry" ]]; then
+    add_manual "无法从 grub.cfg 解析 ${prev} 的菜单项。请重启时手动选 Advanced options → ${prev}。"
+    return 0
+  fi
+  if grub-reboot "$entry" >>"$LOG_FILE" 2>&1; then
+    add_action "已设置下次启动进入 ${prev}（${entry}）。请重启，联网后安装 linux-modules-extra-${KERNEL}"
+  else
+    add_manual "grub-reboot 失败。请重启时手动选择 ${prev}。"
+  fi
+}
+
 wifi_visible_now() {
   if have nmcli && nmcli -t -f TYPE,STATE device status 2>/dev/null | grep -q '^wifi:'; then
     return 0
@@ -938,7 +1240,14 @@ fix_risky_all() {
   fix_netplan
   fix_unmanaged
   fix_dkms_conflict
+  fix_dkms_rebuild
   fix_blacklist
+  fix_rfkill_hard
+  fix_windows_fast_startup
+  fix_firmware
+  fix_secure_boot_mok
+  fix_no_hardware
+  fix_modules_extra_grub
   fix_clear_connections
 }
 

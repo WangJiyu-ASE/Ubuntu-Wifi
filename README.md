@@ -37,19 +37,18 @@ chmod +x wifi-fix.sh
 - 网卡 `unmanaged`
 - 冲突的 `backport-iwlwifi-dkms`（且不像 Intel 网卡）
 - `/etc/modprobe.d` 里把当前网卡需要的驱动拉黑了
+- `rfkill` 硬封锁：请你按飞行模式键的同时，脚本再尝试 unblock
+- Windows 快速启动残留：复位 PCI 无线网卡并重新加载驱动（不能在 Windows 里关快速启动）
+- 缺 Intel 固件：查找/拷贝 `.ucode`，并尝试重装 `linux-firmware`
+- Secure Boot 拦住 DKMS：导入本机 MOK 证书（不关 Secure Boot、不改 BIOS；重启后要在 MOK Manager 登记）
+- Realtek / Broadcom DKMS 编不过：装 headers、`dkms autoinstall`，Broadcom 可再试 `bcmwl-kernel-source`
+- PCI/USB 看不到网卡：重新扫描总线
+- 缺 `linux-modules-extra` 且 apt 失败：把**下一次启动**设到带模块的旧内核（`grub-reboot`）
 - 仍无无线网卡时，备份并清空已保存的 WiFi 连接
 
 改动前会备份到 `/var/tmp/ubuntu-wifi-fix-时间戳/`。
 
-## 只诊断、给出下一步（不自动改）
-
-- `rfkill` 硬封锁（飞行模式键 / 机身开关）
-- Windows 快速启动占用网卡（双系统）
-- Intel `iwlwifi` 固件 `.ucode` 缺失或版本不够
-- Secure Boot 拒绝未签名 DKMS 模块
-- Realtek / Broadcom 第三方 DKMS 在新 HWE 内核上编不过
-- PCI/USB 完全看不到无线控制器（虚拟机未直通，或硬件未上电）
-- 缺 `linux-modules-extra` 且 apt 缓存也没有：需进 GRUB 上一个内核联网后再装
+若确认修复后问题还在（例如物理开关没拨、Windows 里快速启动还开着、固件文件本机没有），报告里会留下剩余步骤。
 
 ## 日志
 
@@ -65,4 +64,4 @@ chmod +x wifi-fix.sh
 
 ## 覆盖边界
 
-社区里「图标没了 / No Wi-Fi Adapter Found / 更新后 UNCLAIMED」的高频原因，多数能自动处理或给出可执行下一步。不断网机器上无法独自完成「缺内核模块且缓存里没有包」；也不会从 GitHub 拉第三方驱动，也不会关闭 Secure Boot 或改 BIOS。
+社区里「图标没了 / No Wi-Fi Adapter Found / 更新后 UNCLAIMED」的高频原因，多数能自动处理或确认后修复。物理飞行模式键、Windows 里的快速启动开关、本机没有的固件文件，脚本无法代替你去按/去关/去下载，确认后会尽量做 Linux 侧能做的部分。不会从 GitHub 拉第三方驱动，也不会改 BIOS。
